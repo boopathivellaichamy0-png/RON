@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+.venv/
+
+# Node
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary uploads and modified artifacts
+backend/modified/*
+!backend/modified/.gitkeep
+backend/uploads/*_*.pdf
+backend/uploads/*.png
+backend/uploads/test_*.pdf
+uploads/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
