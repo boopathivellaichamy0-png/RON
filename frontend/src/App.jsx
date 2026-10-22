@@ -72,18 +72,52 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Load single page data (vector & OCR)
+  // Load single page data (vector & OCR) with GitHub Pages demo fallback
   const loadPageData = async (targetDocId, targetPage, includeOcr = false) => {
     try {
       const res = await fetch(`/api/doc/${targetDocId}/page/${targetPage}?include_ocr=${includeOcr}`);
-      if (!res.ok) throw new Error('Failed to load page data');
-      const data = await res.json();
-      setPagesData(prev => ({ ...prev, [targetPage]: data }));
-      return data;
+      if (res.ok) {
+        const data = await res.json();
+        setPagesData(prev => ({ ...prev, [targetPage]: data }));
+        return data;
+      }
     } catch (err) {
-      console.error(err);
-      return null;
+      // Backend not running on static GitHub Pages
     }
+
+    // Static Demo Fallback for GitHub Pages
+    try {
+      let demoJsonUrl = '';
+      if (targetDocId.includes('linux')) {
+        demoJsonUrl = `./demo_data/sample_linux_page_${targetPage % 10}.json`;
+      } else if (targetDocId.includes('digital')) {
+        demoJsonUrl = `./demo_data/sample_digital_page_0.json`;
+      } else if (targetDocId.includes('scanned')) {
+        demoJsonUrl = `./demo_data/sample_scanned_page_0.json`;
+      }
+
+      if (demoJsonUrl) {
+        const demoRes = await fetch(demoJsonUrl);
+        if (demoRes.ok) {
+          const raw = await demoRes.json();
+          const fallbackData = {
+            doc_id: targetDocId,
+            page_num: targetPage,
+            page_width: raw.page_width || 595,
+            page_height: raw.page_height || 842,
+            has_vector_text: !!(raw.blocks && raw.blocks.length > 0),
+            vector_blocks: raw.blocks || [],
+            vector_words: raw.words || [],
+            ocr_data: raw.boxes ? raw : null
+          };
+          setPagesData(prev => ({ ...prev, [targetPage]: fallbackData }));
+          return fallbackData;
+        }
+      }
+    } catch (e) {
+      console.warn('Demo fallback also unavailable', e);
+    }
+    return null;
   };
 
   // When docId or currentPage changes, ensure current page's data is loaded
@@ -306,7 +340,49 @@ export default function App() {
         showToast(`No matches found for "${findText}". Try clicking or drawing a box on the word!`, 'error');
       }
     } catch (err) {
-      showToast(err.message, 'error');
+      // Fallback: search client-side across loaded page words (GitHub Pages static mode)
+      const clientMatches = [];
+      const scale = 150.0 / 72.0;
+      const q = findText.trim().toLowerCase();
+
+      Object.entries(pagesData).forEach(([pStr, pData]) => {
+        const pNum = Number(pStr);
+        const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
+        words.forEach(w => {
+          const wText = (w.text || '').toLowerCase();
+          const isMatch = wholeWord ? wText === q : wText.includes(q);
+          if (isMatch) {
+            const bbox = w.bbox || w.pdf_bbox;
+            const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
+            clientMatches.push({
+              id: `demo_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+              type: w.type || 'vector',
+              page: pNum,
+              original_text: w.text,
+              new_text: replaceText || '',
+              pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
+              pixel_bbox: px_bbox,
+              span_text: w.text,
+              font_name: w.font || 'helv',
+              font_type: 'sans',
+              font_size: w.size || 12,
+              font_color: w.color || '#111827',
+              bg_color: w.bg_color || '#ffffff',
+              inpaint: true
+            });
+          }
+        });
+      });
+
+      if (clientMatches.length > 0) {
+        setReplacements(prev => [...prev, ...clientMatches]);
+        setSelectedReplacementId(clientMatches[0].id);
+        setActiveTab('replacements');
+        setSearchStatus(`Found ${clientMatches.length} match(es) in loaded document pages.`);
+        showToast(`Marked ${clientMatches.length} match(es) for replacement!`);
+      } else {
+        showToast('No exact matches found. Try clicking any word box on the preview!', 'error');
+      }
     } finally {
       setProcessing(false);
     }
@@ -503,7 +579,49 @@ export default function App() {
       setPagesData({});
       await loadPageData(docId, currentPage);
     } catch (err) {
-      showToast(err.message, 'error');
+      // Fallback: search client-side across loaded page words (GitHub Pages static mode)
+      const clientMatches = [];
+      const scale = 150.0 / 72.0;
+      const q = findText.trim().toLowerCase();
+
+      Object.entries(pagesData).forEach(([pStr, pData]) => {
+        const pNum = Number(pStr);
+        const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
+        words.forEach(w => {
+          const wText = (w.text || '').toLowerCase();
+          const isMatch = wholeWord ? wText === q : wText.includes(q);
+          if (isMatch) {
+            const bbox = w.bbox || w.pdf_bbox;
+            const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
+            clientMatches.push({
+              id: `demo_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+              type: w.type || 'vector',
+              page: pNum,
+              original_text: w.text,
+              new_text: replaceText || '',
+              pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
+              pixel_bbox: px_bbox,
+              span_text: w.text,
+              font_name: w.font || 'helv',
+              font_type: 'sans',
+              font_size: w.size || 12,
+              font_color: w.color || '#111827',
+              bg_color: w.bg_color || '#ffffff',
+              inpaint: true
+            });
+          }
+        });
+      });
+
+      if (clientMatches.length > 0) {
+        setReplacements(prev => [...prev, ...clientMatches]);
+        setSelectedReplacementId(clientMatches[0].id);
+        setActiveTab('replacements');
+        setSearchStatus(`Found ${clientMatches.length} match(es) in loaded document pages.`);
+        showToast(`Marked ${clientMatches.length} match(es) for replacement!`);
+      } else {
+        showToast('No exact matches found. Try clicking any word box on the preview!', 'error');
+      }
     } finally {
       setProcessing(false);
     }
@@ -521,7 +639,49 @@ export default function App() {
       await loadPageData(docId, currentPage);
       showToast('Document reset to original version');
     } catch (err) {
-      showToast(err.message, 'error');
+      // Fallback: search client-side across loaded page words (GitHub Pages static mode)
+      const clientMatches = [];
+      const scale = 150.0 / 72.0;
+      const q = findText.trim().toLowerCase();
+
+      Object.entries(pagesData).forEach(([pStr, pData]) => {
+        const pNum = Number(pStr);
+        const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
+        words.forEach(w => {
+          const wText = (w.text || '').toLowerCase();
+          const isMatch = wholeWord ? wText === q : wText.includes(q);
+          if (isMatch) {
+            const bbox = w.bbox || w.pdf_bbox;
+            const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
+            clientMatches.push({
+              id: `demo_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+              type: w.type || 'vector',
+              page: pNum,
+              original_text: w.text,
+              new_text: replaceText || '',
+              pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
+              pixel_bbox: px_bbox,
+              span_text: w.text,
+              font_name: w.font || 'helv',
+              font_type: 'sans',
+              font_size: w.size || 12,
+              font_color: w.color || '#111827',
+              bg_color: w.bg_color || '#ffffff',
+              inpaint: true
+            });
+          }
+        });
+      });
+
+      if (clientMatches.length > 0) {
+        setReplacements(prev => [...prev, ...clientMatches]);
+        setSelectedReplacementId(clientMatches[0].id);
+        setActiveTab('replacements');
+        setSearchStatus(`Found ${clientMatches.length} match(es) in loaded document pages.`);
+        showToast(`Marked ${clientMatches.length} match(es) for replacement!`);
+      } else {
+        showToast('No exact matches found. Try clicking any word box on the preview!', 'error');
+      }
     } finally {
       setProcessing(false);
     }
@@ -604,6 +764,19 @@ export default function App() {
           {/* Document Page Image */}
           <img
             src={`/api/doc/${docId}/page-image/${pIdx}?dpi=150&t=${imageTimestamp}`}
+            onError={(e) => {
+              let fallback = '';
+              if (docId.includes('linux')) {
+                fallback = `./demo_data/sample_linux_page_${pIdx % 10}.png`;
+              } else if (docId.includes('digital')) {
+                fallback = './demo_data/sample_digital_page_0.png';
+              } else if (docId.includes('scanned')) {
+                fallback = './demo_data/sample_scanned_page_0.png';
+              }
+              if (fallback && !e.target.src.endsWith(fallback.replace('./', ''))) {
+                e.target.src = fallback;
+              }
+            }}
             alt={`Document Page ${pIdx + 1}`}
             loading="lazy"
             className="block max-w-none pointer-events-none"
