@@ -24,15 +24,14 @@ import {
   HelpCircle,
   Check,
   Scroll,
-  LayoutList,
-  Terminal
+  LayoutList
 } from 'lucide-react';
 
 export default function App() {
-  const [docId, setDocId] = useState('sample_linux_terminal');
-  const [pageCount, setPageCount] = useState(26);
+  const [docId, setDocId] = useState(null);
+  const [pageCount, setPageCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
-  const [docInfo, setDocInfo] = useState({ filename: 'sample_linux_terminal.pdf' });
+  const [docInfo, setDocInfo] = useState({ filename: '' });
   const [viewMode, setViewMode] = useState('scroll'); // 'scroll' (continuous) | 'single'
   const [pagesData, setPagesData] = useState({});
   const [loading, setLoading] = useState(false);
@@ -72,8 +71,9 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Load single page data (vector & OCR) with GitHub Pages demo fallback
+  // Load single page data (vector & OCR)
   const loadPageData = async (targetDocId, targetPage, includeOcr = false) => {
+    if (!targetDocId) return null;
     try {
       const res = await fetch(`/api/doc/${targetDocId}/page/${targetPage}?include_ocr=${includeOcr}`);
       if (res.ok) {
@@ -82,54 +82,21 @@ export default function App() {
         return data;
       }
     } catch (err) {
-      // Backend not running on static GitHub Pages
-    }
-
-    // Static Demo Fallback for GitHub Pages
-    try {
-      let demoJsonUrl = '';
-      if (targetDocId.includes('linux')) {
-        demoJsonUrl = `./demo_data/sample_linux_page_${targetPage % 10}.json`;
-      } else if (targetDocId.includes('digital')) {
-        demoJsonUrl = `./demo_data/sample_digital_page_0.json`;
-      } else if (targetDocId.includes('scanned')) {
-        demoJsonUrl = `./demo_data/sample_scanned_page_0.json`;
-      }
-
-      if (demoJsonUrl) {
-        const demoRes = await fetch(demoJsonUrl);
-        if (demoRes.ok) {
-          const raw = await demoRes.json();
-          const fallbackData = {
-            doc_id: targetDocId,
-            page_num: targetPage,
-            page_width: raw.page_width || 595,
-            page_height: raw.page_height || 842,
-            has_vector_text: !!(raw.blocks && raw.blocks.length > 0),
-            vector_blocks: raw.blocks || [],
-            vector_words: raw.words || [],
-            ocr_data: raw.boxes ? raw : null
-          };
-          setPagesData(prev => ({ ...prev, [targetPage]: fallbackData }));
-          return fallbackData;
-        }
-      }
-    } catch (e) {
-      console.warn('Demo fallback also unavailable', e);
+      console.warn('Backend loadPageData request error', err);
     }
     return null;
   };
 
   // When docId or currentPage changes, ensure current page's data is loaded
   useEffect(() => {
-    if (!pagesData[currentPage]) {
+    if (docId && !pagesData[currentPage]) {
       loadPageData(docId, currentPage);
     }
   }, [docId, currentPage]);
 
   // IntersectionObserver to auto-update currentPage when scrolling through continuous pages
   useEffect(() => {
-    if (viewMode !== 'scroll' || !scrollContainerRef.current) return;
+    if (viewMode !== 'scroll' || !scrollContainerRef.current || !docId) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -170,6 +137,7 @@ export default function App() {
   }, [isDrawMode]);
 
   const jumpToPage = (targetPage) => {
+    if (!docId) return;
     const p = Math.max(0, Math.min(pageCount - 1, targetPage));
     setCurrentPage(p);
     if (!pagesData[p]) {
@@ -183,86 +151,68 @@ export default function App() {
     }
   };
 
-  const loadSample = async (sampleType) => {
+  const handleFileUpload = async (e) => {
+    const file = e.target?.files ? e.target.files[0] : (e.files ? e.files[0] : e);
+    if (!file) return;
+
+    setLoading(true);
+    setPagesData({});
     setReplacements([]);
     setSelectedReplacementId(null);
     setFindText('');
     setReplaceText('');
     setSearchStatus('');
-    setPagesData({});
-
-    let targetDocId = 'sample_linux_terminal';
-    let targetFilename = 'sample_linux_terminal.pdf';
-    let count = 26;
-
-    if (sampleType === 'linux') {
-      targetDocId = 'sample_linux_terminal';
-      targetFilename = 'sample_linux_terminal.pdf';
-      count = 26;
-      showToast('Loaded Sample Linux Terminal PDF (26 Pages)');
-    } else if (sampleType === 'digital') {
-      targetDocId = 'sample_digital';
-      targetFilename = 'sample_digital_contract.pdf';
-      count = 1;
-      showToast('Loaded Sample Digital Contract (Vector PDF)');
-    } else if (sampleType === 'scanned') {
-      targetDocId = 'sample_scanned';
-      targetFilename = 'sample_scanned_receipt.pdf';
-      count = 1;
-      showToast('Loaded Sample Scanned Receipt (OCR & Inpainting)');
-    }
-
-    setDocId(targetDocId);
-    setDocInfo({ filename: targetFilename });
-    setPageCount(count);
-    setCurrentPage(0);
-    setImageTimestamp(Date.now());
-
-    try {
-      const res = await fetch(`/api/doc/${targetDocId}/info`);
-      if (res.ok) {
-        const info = await res.json();
-        setPageCount(info.page_count);
-      }
-    } catch (e) {
-      // fallback
-    }
-
-    await loadPageData(targetDocId, 0);
-  };
-
-  // Initial load
-  useEffect(() => {
-    loadSample('linux');
-  }, []);
-
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
 
     const formData = new FormData();
     formData.append('file', file);
 
-    setLoading(true);
-    setPagesData({});
     try {
       const res = await fetch('/api/upload', {
         method: 'POST',
         body: formData,
       });
-      if (!res.ok) throw new Error('Failed to upload document');
-      const data = await res.json();
-      setDocId(data.doc_id);
-      setPageCount(data.page_count);
-      setCurrentPage(0);
-      setDocInfo({ filename: data.filename });
-      setReplacements([]);
-      setSelectedReplacementId(null);
-      setImageTimestamp(Date.now());
-      showToast(`Uploaded: ${data.filename} (${data.page_count} pages)`);
-      await loadPageData(data.doc_id, 0);
+      if (res.ok) {
+        const data = await res.json();
+        setDocId(data.doc_id);
+        setPageCount(data.page_count);
+        setCurrentPage(0);
+        setDocInfo({ filename: data.filename });
+        setImageTimestamp(Date.now());
+        showToast(`Uploaded: ${data.filename} (${data.page_count} page${data.page_count > 1 ? 's' : ''})`);
+        await loadPageData(data.doc_id, 0);
+        return;
+      }
+      throw new Error('Server upload failed');
     } catch (err) {
-      showToast(err.message, 'error');
+      // If backend is unreachable (e.g. static hosting) and file is an image:
+      if (file.type && file.type.startsWith('image/')) {
+        const objectUrl = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          const clientDocId = 'client_img_' + Date.now();
+          setDocId(clientDocId);
+          setPageCount(1);
+          setCurrentPage(0);
+          setDocInfo({ filename: file.name });
+          setPagesData({
+            0: {
+              page_num: 0,
+              page_width: img.width,
+              page_height: img.height,
+              has_vector_text: false,
+              vector_blocks: [],
+              ocr_data: { words: [], boxes: [] },
+              client_image_url: objectUrl,
+              is_client: true,
+            }
+          });
+          setImageTimestamp(Date.now());
+          showToast(`Opened ${file.name} in client editor. Use Drag Box Tool to select and edit text!`);
+        };
+        img.src = objectUrl;
+      } else {
+        showToast('To edit multi-page PDFs and run OCR, make sure the local backend server is running.', 'error');
+      }
     } finally {
       setLoading(false);
     }
@@ -579,55 +529,14 @@ export default function App() {
       setPagesData({});
       await loadPageData(docId, currentPage);
     } catch (err) {
-      // Fallback: search client-side across loaded page words (GitHub Pages static mode)
-      const clientMatches = [];
-      const scale = 150.0 / 72.0;
-      const q = findText.trim().toLowerCase();
-
-      Object.entries(pagesData).forEach(([pStr, pData]) => {
-        const pNum = Number(pStr);
-        const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
-        words.forEach(w => {
-          const wText = (w.text || '').toLowerCase();
-          const isMatch = wholeWord ? wText === q : wText.includes(q);
-          if (isMatch) {
-            const bbox = w.bbox || w.pdf_bbox;
-            const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
-            clientMatches.push({
-              id: `demo_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-              type: w.type || 'vector',
-              page: pNum,
-              original_text: w.text,
-              new_text: replaceText || '',
-              pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
-              pixel_bbox: px_bbox,
-              span_text: w.text,
-              font_name: w.font || 'helv',
-              font_type: 'sans',
-              font_size: w.size || 12,
-              font_color: w.color || '#111827',
-              bg_color: w.bg_color || '#ffffff',
-              inpaint: true
-            });
-          }
-        });
-      });
-
-      if (clientMatches.length > 0) {
-        setReplacements(prev => [...prev, ...clientMatches]);
-        setSelectedReplacementId(clientMatches[0].id);
-        setActiveTab('replacements');
-        setSearchStatus(`Found ${clientMatches.length} match(es) in loaded document pages.`);
-        showToast(`Marked ${clientMatches.length} match(es) for replacement!`);
-      } else {
-        showToast('No exact matches found. Try clicking any word box on the preview!', 'error');
-      }
+      showToast(err.message || 'Failed to apply replacements', 'error');
     } finally {
       setProcessing(false);
     }
   };
 
   const handleResetDoc = async () => {
+    if (!docId) return;
     setProcessing(true);
     try {
       const res = await fetch(`/api/reset-doc/${docId}`, { method: 'POST' });
@@ -639,49 +548,7 @@ export default function App() {
       await loadPageData(docId, currentPage);
       showToast('Document reset to original version');
     } catch (err) {
-      // Fallback: search client-side across loaded page words (GitHub Pages static mode)
-      const clientMatches = [];
-      const scale = 150.0 / 72.0;
-      const q = findText.trim().toLowerCase();
-
-      Object.entries(pagesData).forEach(([pStr, pData]) => {
-        const pNum = Number(pStr);
-        const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
-        words.forEach(w => {
-          const wText = (w.text || '').toLowerCase();
-          const isMatch = wholeWord ? wText === q : wText.includes(q);
-          if (isMatch) {
-            const bbox = w.bbox || w.pdf_bbox;
-            const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
-            clientMatches.push({
-              id: `demo_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-              type: w.type || 'vector',
-              page: pNum,
-              original_text: w.text,
-              new_text: replaceText || '',
-              pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
-              pixel_bbox: px_bbox,
-              span_text: w.text,
-              font_name: w.font || 'helv',
-              font_type: 'sans',
-              font_size: w.size || 12,
-              font_color: w.color || '#111827',
-              bg_color: w.bg_color || '#ffffff',
-              inpaint: true
-            });
-          }
-        });
-      });
-
-      if (clientMatches.length > 0) {
-        setReplacements(prev => [...prev, ...clientMatches]);
-        setSelectedReplacementId(clientMatches[0].id);
-        setActiveTab('replacements');
-        setSearchStatus(`Found ${clientMatches.length} match(es) in loaded document pages.`);
-        showToast(`Marked ${clientMatches.length} match(es) for replacement!`);
-      } else {
-        showToast('No exact matches found. Try clicking any word box on the preview!', 'error');
-      }
+      showToast(err.message || 'Failed to reset document', 'error');
     } finally {
       setProcessing(false);
     }
@@ -763,20 +630,7 @@ export default function App() {
         >
           {/* Document Page Image */}
           <img
-            src={`/api/doc/${docId}/page-image/${pIdx}?dpi=150&t=${imageTimestamp}`}
-            onError={(e) => {
-              let fallback = '';
-              if (docId.includes('linux')) {
-                fallback = `./demo_data/sample_linux_page_${pIdx % 10}.png`;
-              } else if (docId.includes('digital')) {
-                fallback = './demo_data/sample_digital_page_0.png';
-              } else if (docId.includes('scanned')) {
-                fallback = './demo_data/sample_scanned_page_0.png';
-              }
-              if (fallback && !e.target.src.endsWith(fallback.replace('./', ''))) {
-                e.target.src = fallback;
-              }
-            }}
+            src={pData?.client_image_url || `/api/doc/${docId}/page-image/${pIdx}?dpi=150&t=${imageTimestamp}`}
             alt={`Document Page ${pIdx + 1}`}
             loading="lazy"
             className="block max-w-none pointer-events-none"
@@ -955,41 +809,14 @@ export default function App() {
                 Exact Word Editor
               </span>
             </h1>
-            <p className="text-[11px] text-slate-400 truncate max-w-xs">{docInfo.filename} ({pageCount} pages)</p>
+            <p className="text-[11px] text-slate-400 truncate max-w-xs">
+              {docId ? `${docInfo.filename} (${pageCount} page${pageCount > 1 ? 's' : ''})` : 'Fresh Workspace • Ready to Upload'}
+            </p>
           </div>
         </div>
 
-        {/* Center: Mode Indicator & Demo Switcher */}
+        {/* Center/Right: Upload & Action Controls */}
         <div className="flex items-center gap-2">
-          {/* Demo Document Buttons */}
-          <div className="flex items-center bg-slate-800/80 p-0.5 rounded-lg border border-slate-700">
-            <button
-              onClick={() => loadSample('linux')}
-              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md transition ${
-                docId === 'sample_linux_terminal' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Terminal className="w-3.5 h-3.5" />
-              Demo Linux Terminal (26p)
-            </button>
-            <button
-              onClick={() => loadSample('digital')}
-              className={`text-xs px-2.5 py-1 rounded-md transition ${
-                docId === 'sample_digital' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Demo Contract (Vector)
-            </button>
-            <button
-              onClick={() => loadSample('scanned')}
-              className={`text-xs px-2.5 py-1 rounded-md transition ${
-                docId === 'sample_scanned' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Demo Receipt (Scan)
-            </button>
-          </div>
-
           <input
             type="file"
             ref={fileInputRef}
@@ -999,57 +826,78 @@ export default function App() {
           />
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700 transition"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            Upload PDF/Image
-          </button>
-        </div>
-
-        {/* Action Controls */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleResetDoc}
-            disabled={processing}
-            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition"
-            title="Undo and reset document"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reset
-          </button>
-
-          {selectedReplacementId && (
-            <button
-              onClick={() => handleApply(true)}
-              disabled={processing}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg shadow transition"
-              title="Apply only the currently selected word replacement"
-            >
-              <Check className="w-3.5 h-3.5" />
-              Apply Selected
-            </button>
-          )}
-
-          <button
-            onClick={() => handleApply(false)}
-            disabled={processing || replacements.length === 0}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg shadow transition ${
-              replacements.length > 0 && !processing
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30'
-                : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-            }`}
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            {processing ? 'Applying...' : `Apply All (${replacements.length})`}
-          </button>
-
-          <button
-            onClick={handleDownload}
             className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-600/30 transition"
           >
-            <Download className="w-4 h-4" />
-            Download PDF
+            <Upload className="w-4 h-4" />
+            Upload Document
           </button>
+
+          {docId && (
+            <>
+              <button
+                onClick={handleResetDoc}
+                disabled={processing}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition"
+                title="Undo and reset document"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset
+              </button>
+
+              {selectedReplacementId && (
+                <button
+                  onClick={() => handleApply(true)}
+                  disabled={processing}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg shadow transition"
+                  title="Apply only the currently selected word replacement"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  Apply Selected
+                </button>
+              )}
+
+              <button
+                onClick={() => handleApply(false)}
+                disabled={processing || replacements.length === 0}
+                className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg shadow transition ${
+                  replacements.length > 0 && !processing
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30'
+                    : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                {processing ? 'Applying...' : `Apply All (${replacements.length})`}
+              </button>
+
+              <button
+                onClick={handleDownload}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-600/30 transition"
+              >
+                <Download className="w-4 h-4" />
+                Download PDF
+              </button>
+
+              <button
+                onClick={() => {
+                  setDocId(null);
+                  setDocInfo({ filename: '' });
+                  setPageCount(0);
+                  setCurrentPage(0);
+                  setPagesData({});
+                  setReplacements([]);
+                  setSelectedReplacementId(null);
+                  setFindText('');
+                  setReplaceText('');
+                  setSearchStatus('');
+                }}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 rounded-lg border border-rose-900/40 transition"
+                title="Close document"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Close
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -1061,11 +909,12 @@ export default function App() {
             <Search className="w-4 h-4 text-slate-400 shrink-0" />
             <input
               type="text"
-              placeholder="Exact search word (e.g. ashwant)..."
+              placeholder="Search word or phrase..."
               value={findText}
               onChange={(e) => setFindText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearchAndMark()}
-              className="bg-transparent text-xs w-full text-white placeholder-slate-500 focus:outline-none font-mono"
+              disabled={!docId}
+              className="bg-transparent text-xs w-full text-white placeholder-slate-500 focus:outline-none font-mono disabled:opacity-50"
             />
           </div>
 
@@ -1074,11 +923,12 @@ export default function App() {
             <Replace className="w-4 h-4 text-emerald-400 shrink-0" />
             <input
               type="text"
-              placeholder="Replacement word (e.g. boopathi)..."
+              placeholder="Replacement text..."
               value={replaceText}
               onChange={(e) => setReplaceText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearchAndMark()}
-              className="bg-transparent text-xs w-full text-white placeholder-slate-500 focus:outline-none font-mono"
+              disabled={!docId}
+              className="bg-transparent text-xs w-full text-white placeholder-slate-500 focus:outline-none font-mono disabled:opacity-50"
             />
           </div>
 
@@ -1088,7 +938,8 @@ export default function App() {
               type="checkbox"
               checked={wholeWord}
               onChange={(e) => setWholeWord(e.target.checked)}
-              className="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0"
+              disabled={!docId}
+              className="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0 disabled:opacity-50"
             />
             <span>Exact Whole Word</span>
           </label>
@@ -1099,14 +950,15 @@ export default function App() {
               type="checkbox"
               checked={searchAllPages}
               onChange={(e) => setSearchAllPages(e.target.checked)}
-              className="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0"
+              disabled={!docId}
+              className="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0 disabled:opacity-50"
             />
-            <span>Search All {pageCount} Pages</span>
+            <span>Search All {pageCount > 0 ? `${pageCount} ` : ''}Pages</span>
           </label>
 
           <button
             onClick={handleSearchAndMark}
-            disabled={processing || !findText.trim()}
+            disabled={!docId || processing || !findText.trim()}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition disabled:opacity-50 shadow"
           >
             <Search className="w-3.5 h-3.5" />
@@ -1192,18 +1044,6 @@ export default function App() {
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
-
-              {/* Terminal Quick Jump Pill if Linux sample */}
-              {docId === 'sample_linux_terminal' && (
-                <button
-                  onClick={() => jumpToPage(7)}
-                  className="ml-2 flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-slate-800 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-700/50 transition font-mono"
-                  title="Jump directly to terminal screenshot on Page 8"
-                >
-                  <Terminal className="w-3 h-3 text-emerald-400" />
-                  Jump to Terminal (Page 8)
-                </button>
-              )}
             </div>
 
             {/* Tools */}
@@ -1277,8 +1117,81 @@ export default function App() {
               </div>
             )}
 
-            {/* Continuous Scroll View: Render all pages vertically */}
-            {viewMode === 'scroll' ? (
+            {!docId ? (
+              /* Fresh Workspace Empty State */
+              <div className="flex-1 flex flex-col items-center justify-center p-8 max-w-2xl mx-auto my-auto text-center w-full">
+                <div
+                  onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                      handleFileUpload(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full border-2 border-dashed border-slate-700 hover:border-indigo-500 bg-slate-900/60 hover:bg-slate-900/90 rounded-2xl p-12 transition cursor-pointer flex flex-col items-center group shadow-2xl"
+                >
+                  <div className="w-20 h-20 rounded-2xl bg-indigo-950/80 border border-indigo-700/60 flex items-center justify-center text-indigo-400 group-hover:scale-110 group-hover:border-indigo-500 transition mb-6 shadow-xl shadow-indigo-950/50">
+                    <Upload className="w-10 h-10 group-hover:text-white transition" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">
+                    Upload your Document to get started
+                  </h3>
+                  <p className="text-sm text-slate-400 max-w-md mb-6 leading-relaxed">
+                    Drag and drop your PDF or image here, or click to browse files from your computer.
+                  </p>
+                  <button
+                    type="button"
+                    className="flex items-center gap-2 px-6 py-2.5 text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg shadow-lg shadow-indigo-600/30 transition pointer-events-none"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Browse PDF or Image
+                  </button>
+                  <div className="flex items-center gap-2 mt-6">
+                    <span className="text-[11px] font-mono text-slate-500 uppercase tracking-wider">Formats:</span>
+                    {['PDF', 'PNG', 'JPG', 'TIFF', 'BMP', 'WEBP'].map(ext => (
+                      <span key={ext} className="text-[10px] font-mono bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">
+                        .{ext.toLowerCase()}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Feature Highlights Grid */}
+                <div className="grid grid-cols-3 gap-4 mt-8 w-full text-left">
+                  <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 shadow-md">
+                    <div className="flex items-center gap-2 text-indigo-400 text-xs font-semibold mb-1">
+                      <Crosshair className="w-4 h-4 text-amber-400" />
+                      Continuous Drag Tool
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-normal">
+                      Draw multiple bounding boxes continuously across any low-clarity text or scanned regions.
+                    </p>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 shadow-md">
+                    <div className="flex items-center gap-2 text-indigo-400 text-xs font-semibold mb-1">
+                      <Search className="w-4 h-4 text-emerald-400" />
+                      Whole Document Scan
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-normal">
+                      Scan all pages and mark every occurrence of target words in one click.
+                    </p>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800/80 shadow-md">
+                    <div className="flex items-center gap-2 text-indigo-400 text-xs font-semibold mb-1">
+                      <Sparkles className="w-4 h-4 text-pink-400" />
+                      Smart Inpainting
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-normal">
+                      Preserves textures, samples background colors, and matches typography seamlessly.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : viewMode === 'scroll' ? (
               <div className="flex flex-col items-center w-full">
                 {Array.from({ length: pageCount }).map((_, pIdx) => renderPageCanvas(pIdx))}
               </div>
@@ -1344,7 +1257,7 @@ export default function App() {
                   </div>
                   <h3 className="text-sm font-semibold text-slate-300">No Words Marked</h3>
                   <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
-                    Type a word in the top search bar (e.g. <code className="text-indigo-400 font-mono">ashwant</code>) and click <b>Scan & Mark</b>, or click any word on the preview!
+                    Type a word in the top search bar and click <b>Scan & Mark</b>, or click any word on the preview!
                   </p>
                 </div>
               ) : (
@@ -1567,21 +1480,21 @@ export default function App() {
             <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs text-slate-300 leading-relaxed">
               <div className="p-3 bg-indigo-950/40 rounded-xl border border-indigo-900/60">
                 <h4 className="font-semibold text-indigo-300 flex items-center gap-1.5 mb-1">
-                  <Terminal className="w-4 h-4 text-emerald-400" />
-                  Linux Terminal & Code Editing
+                  <Sparkles className="w-4 h-4 text-pink-400" />
+                  Quick Getting Started Guide
                 </h4>
                 <p className="text-slate-400 text-[11px]">
-                  Terminal prompts like <code className="text-indigo-300 font-mono">-(ashwant@ashwant)-[~/exp4]</code> have each word and symbol (<code className="text-amber-300">@</code>, <code className="text-amber-300">[ ]</code>) isolated. You can replace just <code className="text-emerald-400 font-mono">ashwant</code> without touching <code className="text-amber-400 font-mono">@</code>!
+                  Upload any PDF or image to detect text, select individual words, or drag custom boxes across low-clarity text regions.
                 </p>
               </div>
 
               <div className="space-y-2">
-                <h4 className="font-semibold text-white">How to Use Scroll View</h4>
+                <h4 className="font-semibold text-white">How to Edit</h4>
                 <ul className="list-disc list-inside space-y-1.5 text-slate-400">
-                  <li><b>Scroll Type Pages:</b> Scroll down continuously through all 26 pages of the document.</li>
-                  <li><b>Jump to Terminal:</b> Click the "Jump to Terminal (Page 8)" button in the toolbar to go straight to the prompt screenshot.</li>
-                  <li><b>Search All Pages:</b> Check "Search All Pages" to find matches across the whole PDF.</li>
-                  <li><b>Exact Word Erasing:</b> Erasing samples surrounding background pixels to make new text blend seamlessly.</li>
+                  <li><b>Continuous Drag Box:</b> Click "Drag Box Tool" to start drawing selection boxes continuously. Press Esc or click again to stop.</li>
+                  <li><b>Batch Whole PDF Search:</b> Enter search text in the top bar and check "Search All Pages" to find and mark every occurrence across your document.</li>
+                  <li><b>Smart Inpainting:</b> Erasing automatically samples neighboring background pixels so new typography blends seamlessly.</li>
+                  <li><b>Single vs Scroll Mode:</b> Toggle between continuous vertical scrolling and single-page view using the top left controls.</li>
                 </ul>
               </div>
             </div>

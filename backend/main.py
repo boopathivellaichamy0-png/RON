@@ -16,7 +16,6 @@ from typing import List, Optional, Any
 from pdf_processor import PDFProcessor
 from ocr_engine import OCREngine
 from inpaint_engine import InpaintEngine
-from sample_generator import create_sample_documents
 
 app = FastAPI(title="Precision PDF & Image Text Editor API", version="2.0.0")
 
@@ -35,9 +34,6 @@ MODIFIED_DIR = os.path.join(BASE_DIR, "modified")
 
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(MODIFIED_DIR, exist_ok=True)
-
-# Generate sample documents
-create_sample_documents(UPLOADS_DIR)
 
 pdf_processor = PDFProcessor(upload_dir=UPLOADS_DIR)
 ocr_engine = OCREngine()
@@ -80,53 +76,9 @@ def get_cached_ocr(file_path: str, page_num: int, width_pt: float, height_pt: fl
     OCR_CACHE[cache_key] = ocr_res
     return ocr_res
 
-# Register existing samples
-linux_sample_path = os.path.join(UPLOADS_DIR, "sample_linux_terminal.pdf")
-if os.path.exists(linux_sample_path):
-    try:
-        doc_info = pdf_processor.load_document(linux_sample_path)
-        active_docs["sample_linux_terminal"] = {
-            "file_path": linux_sample_path,
-            "current_path": linux_sample_path,
-            "filename": "sample_linux_terminal.pdf",
-            "page_count": doc_info["page_count"]
-        }
-    except Exception:
-        pass
-
-digital_sample_path = os.path.join(UPLOADS_DIR, "sample_digital_contract.pdf")
-if os.path.exists(digital_sample_path):
-    active_docs["sample_digital"] = {
-        "file_path": digital_sample_path,
-        "current_path": digital_sample_path,
-        "filename": "sample_digital_contract.pdf",
-        "page_count": 1
-    }
-
-scanned_sample_path = os.path.join(UPLOADS_DIR, "sample_scanned_receipt.pdf")
-if os.path.exists(scanned_sample_path):
-    active_docs["sample_scanned"] = {
-        "file_path": scanned_sample_path,
-        "current_path": scanned_sample_path,
-        "filename": "sample_scanned_receipt.pdf",
-        "page_count": 1
-    }
-
 def get_doc_entry(doc_id: str):
     if doc_id in active_docs:
         return active_docs[doc_id]
-    if doc_id == "sample_linux_terminal":
-        linux_path = os.path.join(UPLOADS_DIR, "sample_linux_terminal.pdf")
-        if os.path.exists(linux_path):
-            doc_info = pdf_processor.load_document(linux_path)
-            entry = {
-                "file_path": linux_path,
-                "current_path": linux_path,
-                "filename": "sample_linux_terminal.pdf",
-                "page_count": doc_info["page_count"]
-            }
-            active_docs[doc_id] = entry
-            return entry
     # Check if uploaded file exists on disk with this doc_id
     if os.path.exists(UPLOADS_DIR):
         for fname in os.listdir(UPLOADS_DIR):
