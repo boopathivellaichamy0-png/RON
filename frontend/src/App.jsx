@@ -65,15 +65,143 @@ export default function App() {
 
   const fileInputRef = useRef(null);
   const scrollContainerRef = useRef(null);
+  const clientPdfRef = useRef(null);
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Helper: render a single page of client-side PDF.js document
+  const renderClientPdfPage = async (pdf, pageIndex) => {
+    try {
+      const page = await pdf.getPage(pageIndex + 1);
+      const scale = 150.0 / 72.0;
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      const blobUrl = await new Promise(res =>
+        canvas.toBlob(blob => res(URL.createObjectURL(blob)), 'image/jpeg', 0.92)
+      );
+
+      const textContent = await page.getTextContent();
+      const vectorWords = [];
+
+      textContent.items.forEach((item, itemIdx) => {
+        const tx = item.transform;
+        const itemX = tx[4];
+        const itemY = tx[5];
+        const itemW = item.width;
+        const itemH = item.height || Math.hypot(tx[2], tx[3]) || 12;
+
+        const pdfPageHeight = page.view[3] - page.view[1];
+        const topPdf = pdfPageHeight - itemY;
+        const topPt = topPdf - itemH;
+
+        const words = item.str.split(/\s+/).filter(Boolean);
+        if (words.length <= 1) {
+          if (item.str.trim()) {
+            vectorWords.push({
+              id: `cw_${pageIndex}_${itemIdx}`,
+              text: item.str.trim(),
+              bbox: [itemX, topPt, itemX + itemW, topPt + itemH],
+              pixel_bbox: [itemX * scale, topPt * scale, (itemX + itemW) * scale, (topPt + itemH) * scale],
+              font: item.fontName || 'sans-serif',
+              size: Math.round(itemH),
+              color: '#111827',
+              bg_color: '#ffffff',
+              type: 'vector'
+            });
+          }
+        } else {
+          const avgCharW = itemW / Math.max(1, item.str.length);
+          let currIdx = 0;
+          words.forEach((w, wIdx) => {
+            const wordOffset = item.str.indexOf(w, currIdx);
+            currIdx = wordOffset + w.length;
+            const wX = itemX + (wordOffset * avgCharW);
+            const wW = w.length * avgCharW;
+            vectorWords.push({
+              id: `cw_${pageIndex}_${itemIdx}_${wIdx}`,
+              text: w,
+              bbox: [wX, topPt, wX + wW, topPt + itemH],
+              pixel_bbox: [wX * scale, topPt * scale, (wX + wW) * scale, (topPt + itemH) * scale],
+              font: item.fontName || 'sans-serif',
+              size: Math.round(itemH),
+              color: '#111827',
+              bg_color: '#ffffff',
+              type: 'vector'
+            });
+          });
+        }
+      });
+
+      const pageObj = {
+        page_num: pageIndex,
+        page_width: page.view[2] - page.view[0],
+        page_height: page.view[3] - page.view[1],
+        has_vector_text: vectorWords.length > 0,
+        vector_words: vectorWords,
+        vector_blocks: [],
+        ocr_data: { words: [], boxes: [] },
+        client_image_url: blobUrl,
+        is_client: true,
+        canvasElement: canvas
+      };
+
+      setPagesData(prev => ({ ...prev, [pageIndex]: pageObj }));
+      return pageObj;
+    } catch (e) {
+      console.error('Failed to render client pdf page', pageIndex, e);
+      return null;
+    }
+  };
+
+  // Helper: load PDF completely client-side via PDF.js (works on GitHub Pages without backend)
+  const loadClientPdf = async (file) => {
+    if (!window.pdfjsLib) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+        script.onload = () => {
+          if (window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          }
+          resolve();
+        };
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const numPages = pdf.numPages;
+
+    const clientDocId = 'client_pdf_' + Date.now();
+    clientPdfRef.current = pdf;
+    setDocId(clientDocId);
+    setPageCount(numPages);
+    setCurrentPage(0);
+    setDocInfo({ filename: file.name });
+    setImageTimestamp(Date.now());
+
+    await renderClientPdfPage(pdf, 0);
+    showToast(`Loaded ${file.name} (${numPages} page${numPages > 1 ? 's' : ''}) in browser!`);
+  };
+
   // Load single page data (vector & OCR)
   const loadPageData = async (targetDocId, targetPage, includeOcr = false) => {
     if (!targetDocId) return null;
+
+    if (targetDocId.startsWith('client_pdf_') && clientPdfRef.current) {
+      return await renderClientPdfPage(clientPdfRef.current, targetPage);
+    }
+
     try {
       const res = await fetch(`/api/doc/${targetDocId}/page/${targetPage}?include_ocr=${includeOcr}`);
       if (res.ok) {
@@ -184,8 +312,15 @@ export default function App() {
       }
       throw new Error('Server upload failed');
     } catch (err) {
-      // If backend is unreachable (e.g. static hosting) and file is an image:
-      if (file.type && file.type.startsWith('image/')) {
+      // If backend is unreachable (e.g. static GitHub Pages hosting):
+      const isPdf = file.name?.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+      if (isPdf) {
+        try {
+          await loadClientPdf(file);
+        } catch (pdfErr) {
+          showToast('Failed to load PDF in browser: ' + pdfErr.message, 'error');
+        }
+      } else if (file.type && file.type.startsWith('image/')) {
         const objectUrl = URL.createObjectURL(file);
         const img = new Image();
         img.onload = () => {
@@ -211,7 +346,7 @@ export default function App() {
         };
         img.src = objectUrl;
       } else {
-        showToast('To edit multi-page PDFs and run OCR, make sure the local backend server is running.', 'error');
+        showToast('Unsupported file type. Please upload a PDF or image.', 'error');
       }
     } finally {
       setLoading(false);
@@ -502,6 +637,58 @@ export default function App() {
     }
 
     setProcessing(true);
+
+    if (docId?.startsWith('client_')) {
+      try {
+        const pagesToUpdate = [...new Set(itemsToApply.map(i => i.page))];
+        pagesToUpdate.forEach(pIdx => {
+          const pData = pagesData[pIdx];
+          if (!pData) return;
+          const canvas = pData.canvasElement || document.createElement('canvas');
+          if (!pData.canvasElement) {
+            const img = new Image();
+            img.src = pData.client_image_url;
+            canvas.width = img.width || pData.page_width * (150 / 72);
+            canvas.height = img.height || pData.page_height * (150 / 72);
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+          }
+          const ctx = canvas.getContext('2d');
+          const pageItems = itemsToApply.filter(i => i.page === pIdx);
+          pageItems.forEach(item => {
+            const [x0, y0, x1, y1] = item.pixel_bbox;
+            const w = x1 - x0;
+            const h = y1 - y0;
+            ctx.fillStyle = item.bg_color || '#ffffff';
+            ctx.fillRect(x0 - 1, y0 - 1, w + 2, h + 2);
+            if (item.new_text) {
+              const fs = item.font_size ? item.font_size * (150 / 72) : Math.max(12, h * 0.75);
+              ctx.fillStyle = item.font_color || '#000000';
+              ctx.font = `${fs}px ${item.font_type === 'mono' ? 'monospace' : item.font_type === 'serif' ? 'serif' : 'sans-serif'}`;
+              ctx.textBaseline = 'middle';
+              ctx.fillText(item.new_text, x0, y0 + h / 2);
+            }
+          });
+          const newUrl = canvas.toDataURL('image/jpeg', 0.95);
+          setPagesData(prev => ({
+            ...prev,
+            [pIdx]: { ...prev[pIdx], client_image_url: newUrl, canvasElement: canvas }
+          }));
+        });
+
+        const appliedIds = new Set(itemsToApply.map(i => i.id));
+        setReplacements(prev => prev.filter(i => !appliedIds.has(i.id)));
+        setSelectedReplacementId(null);
+        setImageTimestamp(Date.now());
+        showToast(`Applied ${itemsToApply.length} replacement(s) cleanly!`, 'success');
+      } catch (e) {
+        showToast('Failed to apply replacements: ' + e.message, 'error');
+      } finally {
+        setProcessing(false);
+      }
+      return;
+    }
+
     try {
       const res = await fetch('/api/apply-replacements', {
         method: 'POST',
@@ -538,6 +725,16 @@ export default function App() {
   const handleResetDoc = async () => {
     if (!docId) return;
     setProcessing(true);
+    if (docId.startsWith('client_pdf_') && clientPdfRef.current) {
+      setReplacements([]);
+      setSelectedReplacementId(null);
+      setImageTimestamp(Date.now());
+      setPagesData({});
+      await renderClientPdfPage(clientPdfRef.current, currentPage);
+      setProcessing(false);
+      showToast('Document reset to original version');
+      return;
+    }
     try {
       const res = await fetch(`/api/reset-doc/${docId}`, { method: 'POST' });
       if (!res.ok) throw new Error('Reset failed');
@@ -555,6 +752,17 @@ export default function App() {
   };
 
   const handleDownload = () => {
+    if (docId?.startsWith('client_')) {
+      const pData = pagesData[currentPage];
+      if (pData?.client_image_url) {
+        const link = document.createElement('a');
+        link.href = pData.client_image_url;
+        link.download = `edited_${docInfo.filename || 'document'}_page_${currentPage + 1}.jpg`;
+        link.click();
+        showToast(`Downloaded edited Page ${currentPage + 1}!`);
+        return;
+      }
+    }
     window.open(`/api/download/${docId}`, '_blank');
   };
 
@@ -588,9 +796,6 @@ export default function App() {
               isCurrent ? 'bg-indigo-600 text-white shadow' : 'bg-slate-800 text-slate-300'
             }`}>
               Page {pIdx + 1}
-            </span>
-            <span className="text-[11px] text-slate-400">
-              {pIdx === 7 ? '★ Linux Terminal Experiment' : ''}
             </span>
           </div>
 
