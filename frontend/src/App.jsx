@@ -354,10 +354,14 @@ export default function App() {
   };
 
   const handleDeepOcr = async (targetPage = currentPage) => {
+    if (docId?.startsWith('client_')) {
+      showToast('Deep OCR requires the local backend server (run start.bat)', 'info');
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(`/api/doc/${docId}/run-ocr/${targetPage}`, { method: 'POST' });
-      if (!res.ok) throw new Error('OCR failed');
+      if (!res.ok) throw new Error('OCR requires the local backend server');
       const ocrRes = await res.json();
       setPagesData(prev => ({
         ...prev,
@@ -365,7 +369,7 @@ export default function App() {
       }));
       showToast(`Page ${targetPage + 1}: Detected ${ocrRes.words?.length || ocrRes.boxes?.length || 0} words via OCR!`);
     } catch (err) {
-      showToast(err.message, 'error');
+      showToast(err.message || 'OCR failed', 'error');
     } finally {
       setLoading(false);
     }
@@ -380,51 +384,59 @@ export default function App() {
 
     setProcessing(true);
     setSearchStatus(searchAllPages ? `Analyzing whole PDF (${pageCount} pages)...` : `Searching Page ${currentPage + 1}...`);
-    try {
-      const res = await fetch('/api/search-and-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          doc_id: docId,
-          page_num: currentPage,
-          query: findText,
-          replace_with: replaceText,
-          whole_word: wholeWord,
-          all_pages: searchAllPages
-        })
-      });
-      if (!res.ok) throw new Error('Search failed');
-      const result = await res.json();
-
-      if (result.matches && result.matches.length > 0) {
-        const existingIds = new Set(replacements.map(r => r.id));
-        const newItems = result.matches.filter(m => !existingIds.has(m.id));
-        setReplacements(prev => [...prev, ...newItems]);
-        setSelectedReplacementId(result.matches[0].id);
-        setActiveTab('replacements');
-
-        const firstMatch = result.matches[0];
-        jumpToPage(firstMatch.page);
-
-        // Preload page data for matching pages so overlay shows immediately
-        const pagesWithMatches = [...new Set(result.matches.map(m => m.page))];
-        pagesWithMatches.forEach(p => {
-          if (!pagesData[p]) loadPageData(docId, p);
+    if (!docId?.startsWith('client_')) {
+      try {
+        const res = await fetch('/api/search-and-match', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            doc_id: docId,
+            page_num: currentPage,
+            query: findText,
+            replace_with: replaceText,
+            whole_word: wholeWord,
+            all_pages: searchAllPages
+          })
         });
+        if (res.ok) {
+          const result = await res.json();
 
-        const statusMsg = searchAllPages
-          ? `Analyzed whole document (${pageCount} pages): Selected all ${result.matches.length} occurrence(s) across ${pagesWithMatches.length} page(s)!`
-          : `Page ${currentPage + 1}: Selected ${result.matches.length} occurrence(s)!`;
-        setSearchStatus(statusMsg);
-        showToast(`Selected all ${result.matches.length} target word(s) across whole PDF!`);
-      } else {
-        const statusMsg = searchAllPages
-          ? `Analyzed whole document (${pageCount} pages): No matches found for "${findText}".`
-          : `Page ${currentPage + 1}: No matches found for "${findText}".`;
-        setSearchStatus(statusMsg);
-        showToast(`No matches found for "${findText}". Try clicking or drawing a box on the word!`, 'error');
+          if (result.matches && result.matches.length > 0) {
+            const existingIds = new Set(replacements.map(r => r.id));
+            const newItems = result.matches.filter(m => !existingIds.has(m.id));
+            setReplacements(prev => [...prev, ...newItems]);
+            setSelectedReplacementId(result.matches[0].id);
+            setActiveTab('replacements');
+
+            const firstMatch = result.matches[0];
+            jumpToPage(firstMatch.page);
+
+            // Preload page data for matching pages so overlay shows immediately
+            const pagesWithMatches = [...new Set(result.matches.map(m => m.page))];
+            pagesWithMatches.forEach(p => {
+              if (!pagesData[p]) loadPageData(docId, p);
+            });
+
+            const statusMsg = searchAllPages
+              ? `Analyzed whole document (${pageCount} pages): Selected all ${result.matches.length} occurrence(s) across ${pagesWithMatches.length} page(s)!`
+              : `Page ${currentPage + 1}: Selected ${result.matches.length} occurrence(s)!`;
+            setSearchStatus(statusMsg);
+            showToast(`Selected all ${result.matches.length} target word(s) across whole PDF!`);
+          } else {
+            const statusMsg = searchAllPages
+              ? `Analyzed whole document (${pageCount} pages): No matches found for "${findText}".`
+              : `Page ${currentPage + 1}: No matches found for "${findText}".`;
+            setSearchStatus(statusMsg);
+            showToast(`No matches found for "${findText}". Try clicking or drawing a box on the word!`, 'error');
+          }
+          return;
+        }
+      } catch (err) {
+        // Fallback to client-side search below
       }
-    } catch (err) {
+    }
+
+    try {
       // Fallback: search client-side across loaded page words (GitHub Pages static mode)
       const clientMatches = [];
       const scale = 150.0 / 72.0;
@@ -564,43 +576,68 @@ export default function App() {
         Math.round(currentDrawRect.y1)
       ];
 
-      try {
-        const res = await fetch('/api/sample-area', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            doc_id: docId,
-            page_num: pageIndex,
-            pixel_bbox: pixel_bbox,
-            dpi: 150
-          })
-        });
-        const sampleData = await res.json();
-        const style = sampleData.style || {};
+      const scale = 72.0 / 150.0;
+      let pdf_bbox = [pixel_bbox[0] * scale, pixel_bbox[1] * scale, pixel_bbox[2] * scale, pixel_bbox[3] * scale];
+      let style = {
+        font_size: Math.max(10, Math.round(boxH * scale * 0.8)),
+        font_color: '#111827',
+        bg_color: '#ffffff'
+      };
 
-        const newItem = {
-          id: `manual_${Date.now()}`,
-          type: 'manual',
-          page: pageIndex,
-          original_text: '[Custom Word]',
-          new_text: replaceText || '',
-          pdf_bbox: sampleData.pdf_bbox,
-          pixel_bbox: pixel_bbox,
-          font_name: 'helv',
-          font_type: 'sans',
-          font_size: style.font_size || 12,
-          font_color: style.font_color || '#111827',
-          bg_color: style.bg_color || '#ffffff',
-          inpaint: true
-        };
-
-        setReplacements(prev => [...prev, newItem]);
-        setSelectedReplacementId(newItem.id);
-        setActiveTab('replacements');
-        showToast(`Created custom word box on Page ${pageIndex + 1}! Drag again for more boxes.`);
-      } catch (err) {
-        showToast(err.message, 'error');
+      // Try sampling canvas pixels client-side if canvas is available
+      const pData = pagesData[pageIndex];
+      if (pData?.canvasElement) {
+        try {
+          const ctx = pData.canvasElement.getContext('2d');
+          const p = ctx.getImageData(Math.max(0, pixel_bbox[0] - 2), Math.max(0, pixel_bbox[1] - 2), 1, 1).data;
+          const hex = '#' + ((1 << 24) + (p[0] << 16) + (p[1] << 8) + p[2]).toString(16).slice(1);
+          style.bg_color = hex;
+        } catch (e) {}
       }
+
+      // If connected to local backend, attempt server-side style sampling
+      if (!docId?.startsWith('client_')) {
+        try {
+          const res = await fetch('/api/sample-area', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              doc_id: docId,
+              page_num: pageIndex,
+              pixel_bbox: pixel_bbox,
+              dpi: 150
+            })
+          });
+          if (res.ok) {
+            const sampleData = await res.json();
+            if (sampleData.style) style = { ...style, ...sampleData.style };
+            if (sampleData.pdf_bbox) pdf_bbox = sampleData.pdf_bbox;
+          }
+        } catch (err) {
+          // silently fallback to client-side style
+        }
+      }
+
+      const newItem = {
+        id: `manual_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+        type: 'manual',
+        page: pageIndex,
+        original_text: '[Custom Word]',
+        new_text: replaceText || '',
+        pdf_bbox: pdf_bbox,
+        pixel_bbox: pixel_bbox,
+        font_name: 'helv',
+        font_type: 'sans',
+        font_size: style.font_size || Math.max(10, Math.round(boxH * scale * 0.8)),
+        font_color: style.font_color || '#111827',
+        bg_color: style.bg_color || '#ffffff',
+        inpaint: true
+      };
+
+      setReplacements(prev => [...prev, newItem]);
+      setSelectedReplacementId(newItem.id);
+      setActiveTab('replacements');
+      showToast(`Created custom word box on Page ${pageIndex + 1}! Drag again for more boxes.`);
     }
 
     setDrawStart(null);
