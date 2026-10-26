@@ -66,10 +66,61 @@ export default function App() {
   const fileInputRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const clientPdfRef = useRef(null);
+  const clientOriginalFileRef = useRef(null);
+
+  // Detect whether app is running on GitHub Pages or static host (no Python backend)
+  const isStaticSite = typeof window !== 'undefined' && (
+    window.location.hostname.includes('github.io') ||
+    window.location.protocol === 'file:'
+  );
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
+  };
+
+  // Helper: Sample background color accurately from canvas around a bounding box perimeter
+  const sampleCanvasBackgroundColor = (canvas, bbox) => {
+    if (!canvas) return '#ffffff';
+    try {
+      const ctx = canvas.getContext('2d');
+      const [x0, y0, x1, y1] = bbox;
+      const w = canvas.width;
+      const h = canvas.height;
+      const samplePoints = [];
+
+      // Sample along top and bottom perimeter edges just outside the box
+      const stepX = Math.max(1, Math.floor((x1 - x0) / 6));
+      for (let x = Math.max(0, x0 - 2); x <= Math.min(w - 1, x1 + 2); x += stepX) {
+        if (y0 - 3 >= 0) samplePoints.push([x, y0 - 3]);
+        if (y1 + 3 < h) samplePoints.push([x, y1 + 3]);
+      }
+      // Sample along left and right perimeter edges
+      const stepY = Math.max(1, Math.floor((y1 - y0) / 4));
+      for (let y = Math.max(0, y0 - 2); y <= Math.min(h - 1, y1 + 2); y += stepY) {
+        if (x0 - 3 >= 0) samplePoints.push([x0 - 3, y]);
+        if (x1 + 3 < w) samplePoints.push([x1 + 3, y]);
+      }
+
+      if (samplePoints.length === 0) return '#ffffff';
+
+      let rTotal = 0, gTotal = 0, bTotal = 0, validCount = 0;
+      for (const [sx, sy] of samplePoints) {
+        const p = ctx.getImageData(Math.round(sx), Math.round(sy), 1, 1).data;
+        rTotal += p[0];
+        gTotal += p[1];
+        bTotal += p[2];
+        validCount++;
+      }
+
+      if (validCount === 0) return '#ffffff';
+      const rAvg = Math.round(rTotal / validCount);
+      const gAvg = Math.round(gTotal / validCount);
+      const bAvg = Math.round(bTotal / validCount);
+      return '#' + ((1 << 24) + (rAvg << 16) + (gAvg << 8) + bAvg).toString(16).slice(1);
+    } catch (e) {
+      return '#ffffff';
+    }
   };
 
   // Helper: render a single page of client-side PDF.js document
@@ -105,15 +156,17 @@ export default function App() {
         const words = item.str.split(/\s+/).filter(Boolean);
         if (words.length <= 1) {
           if (item.str.trim()) {
+            const px_bbox = [itemX * scale, topPt * scale, (itemX + itemW) * scale, (topPt + itemH) * scale];
+            const sampledBg = sampleCanvasBackgroundColor(canvas, px_bbox);
             vectorWords.push({
               id: `cw_${pageIndex}_${itemIdx}`,
               text: item.str.trim(),
               bbox: [itemX, topPt, itemX + itemW, topPt + itemH],
-              pixel_bbox: [itemX * scale, topPt * scale, (itemX + itemW) * scale, (topPt + itemH) * scale],
+              pixel_bbox: px_bbox,
               font: item.fontName || 'sans-serif',
               size: Math.round(itemH),
               color: '#111827',
-              bg_color: '#ffffff',
+              bg_color: sampledBg,
               type: 'vector'
             });
           }
@@ -125,15 +178,17 @@ export default function App() {
             currIdx = wordOffset + w.length;
             const wX = itemX + (wordOffset * avgCharW);
             const wW = w.length * avgCharW;
+            const px_bbox = [wX * scale, topPt * scale, (wX + wW) * scale, (topPt + itemH) * scale];
+            const sampledBg = sampleCanvasBackgroundColor(canvas, px_bbox);
             vectorWords.push({
               id: `cw_${pageIndex}_${itemIdx}_${wIdx}`,
               text: w,
               bbox: [wX, topPt, wX + wW, topPt + itemH],
-              pixel_bbox: [wX * scale, topPt * scale, (wX + wW) * scale, (topPt + itemH) * scale],
+              pixel_bbox: px_bbox,
               font: item.fontName || 'sans-serif',
               size: Math.round(itemH),
               color: '#111827',
-              bg_color: '#ffffff',
+              bg_color: sampledBg,
               type: 'vector'
             });
           });
@@ -159,6 +214,45 @@ export default function App() {
       console.error('Failed to render client pdf page', pageIndex, e);
       return null;
     }
+  };
+
+  // Helper: process image client-side with canvas support
+  const processClientImage = (file) => {
+    return new Promise((resolve) => {
+      const objectUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const clientDocId = 'client_img_' + Date.now();
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+
+        setDocId(clientDocId);
+        setPageCount(1);
+        setCurrentPage(0);
+        setDocInfo({ filename: file.name });
+        setPagesData({
+          0: {
+            page_num: 0,
+            page_width: img.width,
+            page_height: img.height,
+            has_vector_text: false,
+            vector_blocks: [],
+            vector_words: [],
+            ocr_data: { words: [], boxes: [] },
+            client_image_url: objectUrl,
+            is_client: true,
+            canvasElement: canvas
+          }
+        });
+        setImageTimestamp(Date.now());
+        showToast(`Opened ${file.name} in client editor. Use Drag Box Tool to select and edit text!`);
+        resolve();
+      };
+      img.src = objectUrl;
+    });
   };
 
   // Helper: load PDF completely client-side via PDF.js (works on GitHub Pages without backend)
@@ -203,12 +297,31 @@ export default function App() {
     }
   };
 
+  // Helper: Route file to client processing
+  const processClientFile = async (file) => {
+    const isPdf = file.name?.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+    if (isPdf) {
+      try {
+        await loadClientPdf(file);
+      } catch (pdfErr) {
+        showToast('Failed to load PDF in browser: ' + pdfErr.message, 'error');
+      }
+    } else if (file.type && file.type.startsWith('image/')) {
+      await processClientImage(file);
+    } else {
+      showToast('Unsupported file type. Please upload a PDF or image.', 'error');
+    }
+  };
+
   // Load single page data (vector & OCR)
   const loadPageData = async (targetDocId, targetPage, includeOcr = false) => {
     if (!targetDocId) return null;
 
-    if (targetDocId.startsWith('client_pdf_') && clientPdfRef.current) {
-      return await renderClientPdfPage(clientPdfRef.current, targetPage);
+    if (targetDocId.startsWith('client_')) {
+      if (targetDocId.startsWith('client_pdf_') && clientPdfRef.current) {
+        return await renderClientPdfPage(clientPdfRef.current, targetPage);
+      }
+      return pagesData[targetPage] || null;
     }
 
     try {
@@ -299,6 +412,14 @@ export default function App() {
     setFindText('');
     setReplaceText('');
     setSearchStatus('');
+    clientOriginalFileRef.current = file;
+
+    // If static hosting (GitHub Pages), process directly client-side
+    if (isStaticSite) {
+      await processClientFile(file);
+      setLoading(false);
+      return;
+    }
 
     const formData = new FormData();
     formData.append('file', file);
@@ -321,42 +442,8 @@ export default function App() {
       }
       throw new Error('Server upload failed');
     } catch (err) {
-      // If backend is unreachable (e.g. static GitHub Pages hosting):
-      const isPdf = file.name?.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
-      if (isPdf) {
-        try {
-          await loadClientPdf(file);
-        } catch (pdfErr) {
-          showToast('Failed to load PDF in browser: ' + pdfErr.message, 'error');
-        }
-      } else if (file.type && file.type.startsWith('image/')) {
-        const objectUrl = URL.createObjectURL(file);
-        const img = new Image();
-        img.onload = () => {
-          const clientDocId = 'client_img_' + Date.now();
-          setDocId(clientDocId);
-          setPageCount(1);
-          setCurrentPage(0);
-          setDocInfo({ filename: file.name });
-          setPagesData({
-            0: {
-              page_num: 0,
-              page_width: img.width,
-              page_height: img.height,
-              has_vector_text: false,
-              vector_blocks: [],
-              ocr_data: { words: [], boxes: [] },
-              client_image_url: objectUrl,
-              is_client: true,
-            }
-          });
-          setImageTimestamp(Date.now());
-          showToast(`Opened ${file.name} in client editor. Use Drag Box Tool to select and edit text!`);
-        };
-        img.src = objectUrl;
-      } else {
-        showToast('Unsupported file type. Please upload a PDF or image.', 'error');
-      }
+      // Fallback to client-side engine if backend server is unreachable
+      await processClientFile(file);
     } finally {
       setLoading(false);
     }
@@ -364,7 +451,7 @@ export default function App() {
 
   const handleDeepOcr = async (targetPage = currentPage) => {
     setLoading(true);
-    if (docId?.startsWith('client_')) {
+    if (docId?.startsWith('client_') || isStaticSite) {
       try {
         const pData = pagesData[targetPage];
         if (!pData || !pData.client_image_url) {
@@ -391,11 +478,14 @@ export default function App() {
         if (ret.data && ret.data.words) {
           ret.data.words.forEach((w, idx) => {
             if (w.text.trim()) {
+              const px_bbox = [w.bbox.x0, w.bbox.y0, w.bbox.x1, w.bbox.y1];
+              const sampledBg = pData.canvasElement ? sampleCanvasBackgroundColor(pData.canvasElement, px_bbox) : '#ffffff';
               ocrWords.push({
                 id: `client_ocr_${targetPage}_${idx}_${Date.now()}`,
                 text: w.text.trim(),
-                pixel_bbox: [w.bbox.x0, w.bbox.y0, w.bbox.x1, w.bbox.y1],
+                pixel_bbox: px_bbox,
                 confidence: w.confidence,
+                bg_color: sampledBg,
                 type: 'image_ocr'
               });
             }
@@ -444,7 +534,8 @@ export default function App() {
 
     setProcessing(true);
     setSearchStatus(searchAllPages ? `Analyzing whole PDF (${pageCount} pages)...` : `Searching Page ${currentPage + 1}...`);
-    if (!docId?.startsWith('client_')) {
+    
+    if (!docId?.startsWith('client_') && !isStaticSite) {
       try {
         const res = await fetch('/api/search-and-match', {
           method: 'POST',
@@ -471,7 +562,6 @@ export default function App() {
             const firstMatch = result.matches[0];
             jumpToPage(firstMatch.page);
 
-            // Preload page data for matching pages so overlay shows immediately
             const pagesWithMatches = [...new Set(result.matches.map(m => m.page))];
             pagesWithMatches.forEach(p => {
               if (!pagesData[p]) loadPageData(docId, p);
@@ -510,6 +600,7 @@ export default function App() {
       const clientMatches = [];
       const scale = 150.0 / 72.0;
       const q = findText.trim().toLowerCase();
+      const qTokens = q.split(/\s+/).filter(Boolean);
 
       // Determine pages to search
       const targetPageKeys = searchAllPages
@@ -522,30 +613,72 @@ export default function App() {
         if (!pData) return;
 
         const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
-        words.forEach(w => {
-          const wText = (w.text || '').toLowerCase();
-          const isMatch = wholeWord ? wText === q : wText.includes(q);
-          if (isMatch) {
-            const bbox = w.bbox || w.pdf_bbox;
-            const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
-            clientMatches.push({
-              id: `client_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-              type: w.type || 'vector',
-              page: pNum,
-              original_text: w.text,
-              new_text: replaceText || '',
-              pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
-              pixel_bbox: px_bbox,
-              span_text: w.text,
-              font_name: w.font || 'helv',
-              font_type: 'sans',
-              font_size: w.size || 12,
-              font_color: w.color || '#111827',
-              bg_color: w.bg_color || '#ffffff',
-              inpaint: true
-            });
+
+        // 1. Single word or phrase token matching
+        if (qTokens.length <= 1) {
+          words.forEach(w => {
+            const wText = (w.text || '').toLowerCase();
+            const isMatch = wholeWord ? wText === q : wText.includes(q);
+            if (isMatch) {
+              const bbox = w.bbox || w.pdf_bbox;
+              const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
+              clientMatches.push({
+                id: `client_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+                type: w.type || 'vector',
+                page: pNum,
+                original_text: w.text,
+                new_text: replaceText || '',
+                pdf_bbox: bbox || [px_bbox[0] / scale, px_bbox[1] / scale, px_bbox[2] / scale, px_bbox[3] / scale],
+                pixel_bbox: px_bbox,
+                span_text: w.text,
+                font_name: w.font || 'helv',
+                font_type: 'sans',
+                font_size: w.size || 12,
+                font_color: w.color || '#111827',
+                bg_color: w.bg_color || '#ffffff',
+                inpaint: true
+              });
+            }
+          });
+        } else {
+          // Multi-word phrase matching across consecutive words on same line
+          for (let i = 0; i <= words.length - qTokens.length; i++) {
+            let matched = true;
+            for (let j = 0; j < qTokens.length; j++) {
+              const wordText = (words[i + j].text || '').toLowerCase();
+              if (wholeWord ? wordText !== qTokens[j] : !wordText.includes(qTokens[j])) {
+                matched = false;
+                break;
+              }
+            }
+            if (matched) {
+              const matchedSlice = words.slice(i, i + qTokens.length);
+              const minPxX = Math.min(...matchedSlice.map(w => w.pixel_bbox[0]));
+              const minPxY = Math.min(...matchedSlice.map(w => w.pixel_bbox[1]));
+              const maxPxX = Math.max(...matchedSlice.map(w => w.pixel_bbox[2]));
+              const maxPxY = Math.max(...matchedSlice.map(w => w.pixel_bbox[3]));
+              const combinedText = matchedSlice.map(w => w.text).join(' ');
+
+              clientMatches.push({
+                id: `client_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+                type: matchedSlice[0].type || 'vector',
+                page: pNum,
+                original_text: combinedText,
+                new_text: replaceText || '',
+                pdf_bbox: [minPxX / scale, minPxY / scale, maxPxX / scale, maxPxY / scale],
+                pixel_bbox: [minPxX, minPxY, maxPxX, maxPxY],
+                span_text: combinedText,
+                font_name: matchedSlice[0].font || 'helv',
+                font_type: 'sans',
+                font_size: matchedSlice[0].size || 12,
+                font_color: matchedSlice[0].color || '#111827',
+                bg_color: matchedSlice[0].bg_color || '#ffffff',
+                inpaint: true
+              });
+              i += qTokens.length - 1;
+            }
           }
-        });
+        }
       });
 
       if (clientMatches.length > 0) {
@@ -578,7 +711,13 @@ export default function App() {
       ? [wordItem.bbox[0] * scale, wordItem.bbox[1] * scale, wordItem.bbox[2] * scale, wordItem.bbox[3] * scale]
       : (wordItem.pixel_bbox || [wordItem.pdf_bbox[0] * scale, wordItem.pdf_bbox[1] * scale, wordItem.pdf_bbox[2] * scale, wordItem.pdf_bbox[3] * scale]);
 
-    const bgHex = wordItem.bg_color || '#ffffff';
+    const pData = pagesData[pageIndex];
+    let sampledBg = wordItem.bg_color;
+    if ((!sampledBg || sampledBg === '#ffffff') && pData?.canvasElement) {
+      sampledBg = sampleCanvasBackgroundColor(pData.canvasElement, px_bbox);
+    }
+    const bgHex = sampledBg || '#ffffff';
+
     let isDarkBg = false;
     if (bgHex.startsWith('#') && bgHex.length === 7) {
       const r = parseInt(bgHex.slice(1, 3), 16);
@@ -600,8 +739,8 @@ export default function App() {
       font_name: isTerminal ? 'Consolas' : (wordItem.font || (isVector ? 'helv' : 'Arial')),
       font_type: isTerminal ? 'mono' : (wordItem.font_type || ((wordItem.font && wordItem.font.toLowerCase().includes('bold')) ? 'bold' : 'sans')),
       font_size: wordItem.size || wordItem.est_font_size || 11,
-      font_color: wordItem.color || '#000000',
-      bg_color: wordItem.bg_color || '#ffffff',
+      font_color: wordItem.color || (isDarkBg ? '#ffffff' : '#000000'),
+      bg_color: bgHex,
       inpaint: !isVector
     };
 
@@ -669,19 +808,14 @@ export default function App() {
         bg_color: '#ffffff'
       };
 
-      // Try sampling canvas pixels client-side if canvas is available
+      // Accurate client-side perimeter background color sampling
       const pData = pagesData[pageIndex];
       if (pData?.canvasElement) {
-        try {
-          const ctx = pData.canvasElement.getContext('2d');
-          const p = ctx.getImageData(Math.max(0, pixel_bbox[0] - 2), Math.max(0, pixel_bbox[1] - 2), 1, 1).data;
-          const hex = '#' + ((1 << 24) + (p[0] << 16) + (p[1] << 8) + p[2]).toString(16).slice(1);
-          style.bg_color = hex;
-        } catch (e) {}
+        style.bg_color = sampleCanvasBackgroundColor(pData.canvasElement, pixel_bbox);
       }
 
-      // If connected to local backend, attempt server-side style sampling
-      if (!docId?.startsWith('client_')) {
+      // If connected to local backend (and not static hosting), attempt server-side sampling
+      if (!isStaticSite && !docId?.startsWith('client_')) {
         try {
           const res = await fetch('/api/sample-area', {
             method: 'POST',
@@ -760,44 +894,73 @@ export default function App() {
 
     setProcessing(true);
 
-    if (docId?.startsWith('client_')) {
+    if (docId?.startsWith('client_') || isStaticSite) {
       try {
         const pagesToUpdate = [...new Set(itemsToApply.map(i => i.page))];
-        pagesToUpdate.forEach(pIdx => {
-          const pData = pagesData[pIdx];
-          if (!pData) return;
-          const canvas = pData.canvasElement || document.createElement('canvas');
-          if (!pData.canvasElement) {
+        const updatedPages = { ...pagesData };
+
+        for (const pIdx of pagesToUpdate) {
+          const pData = updatedPages[pIdx];
+          if (!pData) continue;
+
+          let canvas = pData.canvasElement;
+          if (!canvas) {
+            canvas = document.createElement('canvas');
             const img = new Image();
             img.src = pData.client_image_url;
-            canvas.width = img.width || pData.page_width * (150 / 72);
-            canvas.height = img.height || pData.page_height * (150 / 72);
+            await new Promise((resolve) => {
+              img.onload = resolve;
+              img.onerror = resolve;
+            });
+            canvas.width = img.width || Math.round((pData.page_width || 595.28) * (150 / 72));
+            canvas.height = img.height || Math.round((pData.page_height || 841.89) * (150 / 72));
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0);
           }
+
           const ctx = canvas.getContext('2d');
           const pageItems = itemsToApply.filter(i => i.page === pIdx);
+
           pageItems.forEach(item => {
-            const [x0, y0, x1, y1] = item.pixel_bbox;
+            const scale = 150.0 / 72.0;
+            let [x0, y0, x1, y1] = item.pixel_bbox || (item.pdf_bbox ? [item.pdf_bbox[0] * scale, item.pdf_bbox[1] * scale, item.pdf_bbox[2] * scale, item.pdf_bbox[3] * scale] : [0, 0, 0, 0]);
             const w = x1 - x0;
             const h = y1 - y0;
+
+            // Inpaint / Fill background with slight padding to cover anti-aliased edge pixels
             ctx.fillStyle = item.bg_color || '#ffffff';
-            ctx.fillRect(x0 - 1, y0 - 1, w + 2, h + 2);
-            if (item.new_text) {
-              const fs = item.font_size ? item.font_size * (150 / 72) : Math.max(12, h * 0.75);
-              ctx.fillStyle = item.font_color || '#000000';
-              ctx.font = `${fs}px ${item.font_type === 'mono' ? 'monospace' : item.font_type === 'serif' ? 'serif' : 'sans-serif'}`;
+            ctx.fillRect(Math.max(0, x0 - 1), Math.max(0, y0 - 2), w + 2, h + 4);
+
+            // Draw replacement text if specified
+            if (item.new_text && item.new_text.trim()) {
+              const fs = item.font_size ? item.font_size * scale : Math.max(12, Math.round(h * 0.78));
+              ctx.fillStyle = item.font_color || '#111827';
+              const fontFam = item.font_type === 'mono' ? 'monospace' : item.font_type === 'serif' ? 'serif' : 'sans-serif';
+              const isBold = item.font_type === 'bold' || item.font_name?.toLowerCase().includes('bold');
+              ctx.font = `${isBold ? 'bold ' : ''}${Math.round(fs)}px ${fontFam}`;
               ctx.textBaseline = 'middle';
-              ctx.fillText(item.new_text, x0, y0 + h / 2);
+              ctx.fillText(item.new_text, x0, y0 + (h / 2));
             }
           });
-          const newUrl = canvas.toDataURL('image/jpeg', 0.95);
-          setPagesData(prev => ({
-            ...prev,
-            [pIdx]: { ...prev[pIdx], client_image_url: newUrl, canvasElement: canvas }
-          }));
-        });
 
+          const newUrl = canvas.toDataURL('image/jpeg', 0.95);
+
+          // Remove applied items from vector_words & ocr_data so boxes don't linger
+          const appliedItemIds = new Set(pageItems.map(i => i.id));
+          const appliedOrigTexts = new Set(pageItems.map(i => (i.original_text || '').toLowerCase()));
+          const newVectorWords = (pData.vector_words || []).filter(w => !appliedItemIds.has(w.id) && !appliedOrigTexts.has(w.text?.toLowerCase()));
+          const newOcrWords = (pData.ocr_data?.words || []).filter(w => !appliedItemIds.has(w.id) && !appliedOrigTexts.has(w.text?.toLowerCase()));
+
+          updatedPages[pIdx] = {
+            ...pData,
+            client_image_url: newUrl,
+            canvasElement: canvas,
+            vector_words: newVectorWords,
+            ocr_data: { ...(pData.ocr_data || {}), words: newOcrWords }
+          };
+        }
+
+        setPagesData(updatedPages);
         const appliedIds = new Set(itemsToApply.map(i => i.id));
         setReplacements(prev => prev.filter(i => !appliedIds.has(i.id)));
         setSelectedReplacementId(null);
@@ -847,16 +1010,35 @@ export default function App() {
   const handleResetDoc = async () => {
     if (!docId) return;
     setProcessing(true);
+
     if (docId.startsWith('client_pdf_') && clientPdfRef.current) {
       setReplacements([]);
       setSelectedReplacementId(null);
       setImageTimestamp(Date.now());
       setPagesData({});
+      const total = clientPdfRef.current.numPages;
       await renderClientPdfPage(clientPdfRef.current, currentPage);
+      for (let p = 0; p < total; p++) {
+        if (p !== currentPage) {
+          renderClientPdfPage(clientPdfRef.current, p);
+        }
+      }
       setProcessing(false);
       showToast('Document reset to original version');
       return;
     }
+
+    if (docId.startsWith('client_img_') && clientOriginalFileRef.current) {
+      setReplacements([]);
+      setSelectedReplacementId(null);
+      setImageTimestamp(Date.now());
+      setPagesData({});
+      await processClientImage(clientOriginalFileRef.current);
+      setProcessing(false);
+      showToast('Document reset to original version');
+      return;
+    }
+
     try {
       const res = await fetch(`/api/reset-doc/${docId}`, { method: 'POST' });
       if (!res.ok) throw new Error('Reset failed');
@@ -874,9 +1056,9 @@ export default function App() {
   };
 
   const handleDownload = async () => {
-    if (docId?.startsWith('client_')) {
+    if (docId?.startsWith('client_') || isStaticSite) {
       setProcessing(true);
-      showToast('Generating edited multi-page PDF...', 'info');
+      showToast('Generating edited document...', 'info');
       try {
         if (!window.jspdf?.jsPDF) {
           await new Promise((resolve, reject) => {
@@ -901,7 +1083,7 @@ export default function App() {
           if (!canvas && pData?.client_image_url) {
             const img = new Image();
             img.src = pData.client_image_url;
-            await new Promise(r => { img.onload = r; });
+            await new Promise(r => { img.onload = r; img.onerror = r; });
             canvas = document.createElement('canvas');
             canvas.width = img.width;
             canvas.height = img.height;
@@ -912,8 +1094,8 @@ export default function App() {
           if (!canvas) continue;
 
           const imgData = canvas.toDataURL('image/jpeg', 0.95);
-          const ptW = pData.page_width || 595.28;
-          const ptH = pData.page_height || 841.89;
+          const ptW = pData?.page_width || 595.28;
+          const ptH = pData?.page_height || 841.89;
           const orientation = ptW > ptH ? 'landscape' : 'portrait';
 
           if (!pdfDoc) {
