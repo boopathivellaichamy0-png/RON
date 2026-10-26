@@ -192,6 +192,15 @@ export default function App() {
 
     await renderClientPdfPage(pdf, 0);
     showToast(`Loaded ${file.name} (${numPages} page${numPages > 1 ? 's' : ''}) in browser!`);
+
+    // Render remaining pages in background so scroll view and search work seamlessly
+    if (numPages > 1) {
+      (async () => {
+        for (let p = 1; p < numPages; p++) {
+          await renderClientPdfPage(pdf, p);
+        }
+      })();
+    }
   };
 
   // Load single page data (vector & OCR)
@@ -354,14 +363,65 @@ export default function App() {
   };
 
   const handleDeepOcr = async (targetPage = currentPage) => {
+    setLoading(true);
     if (docId?.startsWith('client_')) {
-      showToast('Deep OCR requires the local backend server (run start.bat)', 'info');
+      try {
+        const pData = pagesData[targetPage];
+        if (!pData || !pData.client_image_url) {
+          throw new Error(`Page ${targetPage + 1} is still rendering, please wait a moment.`);
+        }
+
+        showToast(`Running in-browser OCR on Page ${targetPage + 1}...`, 'info');
+
+        if (!window.Tesseract) {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+            s.onload = resolve;
+            s.onerror = reject;
+            document.head.appendChild(s);
+          });
+        }
+
+        const worker = await window.Tesseract.createWorker('eng');
+        const ret = await worker.recognize(pData.client_image_url);
+        await worker.terminate();
+
+        const ocrWords = [];
+        if (ret.data && ret.data.words) {
+          ret.data.words.forEach((w, idx) => {
+            if (w.text.trim()) {
+              ocrWords.push({
+                id: `client_ocr_${targetPage}_${idx}_${Date.now()}`,
+                text: w.text.trim(),
+                pixel_bbox: [w.bbox.x0, w.bbox.y0, w.bbox.x1, w.bbox.y1],
+                confidence: w.confidence,
+                type: 'image_ocr'
+              });
+            }
+          });
+        }
+
+        setPagesData(prev => ({
+          ...prev,
+          [targetPage]: {
+            ...prev[targetPage],
+            ocr_data: { words: ocrWords, boxes: [] }
+          }
+        }));
+
+        showToast(`Page ${targetPage + 1}: Detected ${ocrWords.length} words via in-browser OCR!`);
+      } catch (err) {
+        showToast('In-browser OCR: ' + err.message, 'error');
+      } finally {
+        setLoading(false);
+      }
       return;
     }
-    setLoading(true);
+
     try {
       const res = await fetch(`/api/doc/${docId}/run-ocr/${targetPage}`, { method: 'POST' });
-      if (!res.ok) throw new Error('OCR requires the local backend server');
+      if (!res.ok) throw new Error('OCR failed');
       const ocrRes = await res.json();
       setPagesData(prev => ({
         ...prev,
@@ -437,13 +497,30 @@ export default function App() {
     }
 
     try {
-      // Fallback: search client-side across loaded page words (GitHub Pages static mode)
+      // In-browser client search across pages (supports static GitHub Pages)
+      if (clientPdfRef.current && searchAllPages) {
+        const total = clientPdfRef.current.numPages;
+        for (let pNum = 0; pNum < total; pNum++) {
+          if (!pagesData[pNum]) {
+            await renderClientPdfPage(clientPdfRef.current, pNum);
+          }
+        }
+      }
+
       const clientMatches = [];
       const scale = 150.0 / 72.0;
       const q = findText.trim().toLowerCase();
 
-      Object.entries(pagesData).forEach(([pStr, pData]) => {
+      // Determine pages to search
+      const targetPageKeys = searchAllPages
+        ? Object.keys(pagesData)
+        : [String(currentPage)];
+
+      targetPageKeys.forEach((pStr) => {
         const pNum = Number(pStr);
+        const pData = pagesData[pNum];
+        if (!pData) return;
+
         const words = [...(pData.vector_words || []), ...(pData.ocr_data?.words || [])];
         words.forEach(w => {
           const wText = (w.text || '').toLowerCase();
@@ -452,7 +529,7 @@ export default function App() {
             const bbox = w.bbox || w.pdf_bbox;
             const px_bbox = w.pixel_bbox || (bbox ? [bbox[0] * scale, bbox[1] * scale, bbox[2] * scale, bbox[3] * scale] : [50, 50, 150, 70]);
             clientMatches.push({
-              id: `demo_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+              id: `client_match_${pNum}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
               type: w.type || 'vector',
               page: pNum,
               original_text: w.text,
@@ -475,10 +552,18 @@ export default function App() {
         setReplacements(prev => [...prev, ...clientMatches]);
         setSelectedReplacementId(clientMatches[0].id);
         setActiveTab('replacements');
-        setSearchStatus(`Found ${clientMatches.length} match(es) in loaded document pages.`);
-        showToast(`Marked ${clientMatches.length} match(es) for replacement!`);
+        jumpToPage(clientMatches[0].page);
+        const statusMsg = searchAllPages
+          ? `Analyzed whole document (${pageCount} pages): Selected all ${clientMatches.length} occurrence(s)!`
+          : `Page ${currentPage + 1}: Selected ${clientMatches.length} occurrence(s)!`;
+        setSearchStatus(statusMsg);
+        showToast(`Selected all ${clientMatches.length} target word(s) across document!`);
       } else {
-        showToast('No exact matches found. Try clicking any word box on the preview!', 'error');
+        const statusMsg = searchAllPages
+          ? `Analyzed whole document (${pageCount} pages): No matches found for "${findText}".`
+          : `Page ${currentPage + 1}: No matches found for "${findText}".`;
+        setSearchStatus(statusMsg);
+        showToast(`No matches found for "${findText}". Try clicking or drawing a box on the word!`, 'error');
       }
     } finally {
       setProcessing(false);
@@ -788,18 +873,77 @@ export default function App() {
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (docId?.startsWith('client_')) {
-      const pData = pagesData[currentPage];
-      if (pData?.client_image_url) {
-        const link = document.createElement('a');
-        link.href = pData.client_image_url;
-        link.download = `edited_${docInfo.filename || 'document'}_page_${currentPage + 1}.jpg`;
-        link.click();
-        showToast(`Downloaded edited Page ${currentPage + 1}!`);
-        return;
+      setProcessing(true);
+      showToast('Generating edited multi-page PDF...', 'info');
+      try {
+        if (!window.jspdf?.jsPDF) {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+            s.onload = resolve;
+            s.onerror = reject;
+            document.head.appendChild(s);
+          });
+        }
+
+        const { jsPDF } = window.jspdf;
+        let pdfDoc = null;
+
+        for (let p = 0; p < pageCount; p++) {
+          let pData = pagesData[p];
+          if (!pData && clientPdfRef.current) {
+            pData = await renderClientPdfPage(clientPdfRef.current, p);
+          }
+
+          let canvas = pData?.canvasElement;
+          if (!canvas && pData?.client_image_url) {
+            const img = new Image();
+            img.src = pData.client_image_url;
+            await new Promise(r => { img.onload = r; });
+            canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+          }
+
+          if (!canvas) continue;
+
+          const imgData = canvas.toDataURL('image/jpeg', 0.95);
+          const ptW = pData.page_width || 595.28;
+          const ptH = pData.page_height || 841.89;
+          const orientation = ptW > ptH ? 'landscape' : 'portrait';
+
+          if (!pdfDoc) {
+            pdfDoc = new jsPDF({
+              orientation,
+              unit: 'pt',
+              format: [ptW, ptH]
+            });
+          } else {
+            pdfDoc.addPage([ptW, ptH], orientation);
+          }
+
+          pdfDoc.addImage(imgData, 'JPEG', 0, 0, ptW, ptH);
+        }
+
+        if (pdfDoc) {
+          const baseName = docInfo.filename ? docInfo.filename.replace(/\.[^/.]+$/, "") : 'document';
+          pdfDoc.save(`edited_${baseName}.pdf`);
+          showToast(`Downloaded edited PDF (${pageCount} page${pageCount > 1 ? 's' : ''})!`);
+        } else {
+          throw new Error('No pages available to generate PDF');
+        }
+      } catch (err) {
+        showToast('PDF download failed: ' + err.message, 'error');
+      } finally {
+        setProcessing(false);
       }
+      return;
     }
+
     window.open(`/api/download/${docId}`, '_blank');
   };
 
@@ -871,14 +1015,30 @@ export default function App() {
           className="relative shadow-2xl rounded-b-sm border border-slate-800 bg-white select-none inline-block overflow-hidden"
         >
           {/* Document Page Image */}
-          <img
-            src={pData?.client_image_url || `/api/doc/${docId}/page-image/${pIdx}?dpi=150&t=${imageTimestamp}`}
-            alt={`Document Page ${pIdx + 1}`}
-            loading="lazy"
-            className="block max-w-none pointer-events-none"
-            style={{ minWidth: '400px' }}
-            onDragStart={(e) => e.preventDefault()}
-          />
+          {pData?.client_image_url ? (
+            <img
+              src={pData.client_image_url}
+              alt={`Document Page ${pIdx + 1}`}
+              loading="lazy"
+              className="block max-w-none pointer-events-none"
+              style={{ minWidth: '400px' }}
+              onDragStart={(e) => e.preventDefault()}
+            />
+          ) : !docId?.startsWith('client_') ? (
+            <img
+              src={`/api/doc/${docId}/page-image/${pIdx}?dpi=150&t=${imageTimestamp}`}
+              alt={`Document Page ${pIdx + 1}`}
+              loading="lazy"
+              className="block max-w-none pointer-events-none"
+              style={{ minWidth: '400px' }}
+              onDragStart={(e) => e.preventDefault()}
+            />
+          ) : (
+            <div className="w-[595px] h-[842px] bg-slate-900/60 flex flex-col items-center justify-center text-slate-400 text-xs gap-3">
+              <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+              <span>Rendering Page {pIdx + 1}...</span>
+            </div>
+          )}
 
           {/* OVERLAY 1: Clickable Word Boxes */}
           {showDetectedBoxes && pData && (
